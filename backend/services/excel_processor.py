@@ -8,7 +8,7 @@ from __future__ import annotations
 import hashlib
 import os
 import time
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import pandas as pd
 
@@ -28,7 +28,7 @@ CANDIDATE_HEADERS: dict[str, list[str]] = {
     "address": ["full address", "address", "street address"],
     "latitude": ["latitude", "lat"],
     "longitude": ["longitude", "lng", "lon", "long"],
-    "place_id": ["google place id", "place_id", "place id"],
+    "place_id": ["google place id", "google id", "place_id", "place id"],
     "rating": ["reviews rating", "rating score", "rating"],
     "review_count": [
         "reviews count",
@@ -45,6 +45,15 @@ CANDIDATE_HEADERS: dict[str, list[str]] = {
 # sheet" style runs (full-audit mode's original multi-tab behavior). Not
 # used to filter the dropdown - just surfaced as a warning in the UI.
 EXCLUDED_SHEET_KEYWORDS = ["removed", "chain", "brand", "reference"]
+
+
+def _is_valid_place_id(place_id: Any) -> bool:
+    if not place_id:
+        return False
+    s = str(place_id).strip()
+    if not s or s.lower() == "nan" or s.startswith("0x"):
+        return False
+    return True
 
 
 def _normalize_header(header: str) -> str:
@@ -185,14 +194,21 @@ class EnrichmentEngine:
             place_id = self._row_field(row, mapping.place_id)
 
             try:
-                if place_id:
-                    result = self.client.get_place_details(str(place_id).strip())
+                result = None
+                is_direct_id = _is_valid_place_id(place_id)
+
+                if is_direct_id:
+                    try:
+                        result = self.client.get_place_details(str(place_id).strip())
+                    except PlacesAPIError:
+                        is_direct_id = False
+                        result = self.client.search_text(name, address, lat, lng)
                 else:
                     result = self.client.search_text(name, address, lat, lng)
 
                 if result is None:
                     pass  # no candidate found - leave row untouched, silently
-                elif place_id:
+                elif is_direct_id:
                     # Path A is deterministic - no gate needed.
                     if result.business_status == "CLOSED_PERMANENTLY":
                         df.at[idx, "_to_delete"] = True
@@ -277,8 +293,16 @@ class EnrichmentEngine:
             place_id = self._row_field(row, mapping.place_id)
 
             try:
-                if place_id:
-                    result = self.client.get_place_details(str(place_id).strip())
+                result = None
+                is_direct_id = _is_valid_place_id(place_id)
+
+                if is_direct_id:
+                    try:
+                        result = self.client.get_place_details(str(place_id).strip())
+                    except PlacesAPIError:
+                        is_direct_id = False
+
+                if is_direct_id and result:
                     self._apply_audit_fields(df, idx, result)
                     df.at[idx, "Match"] = "Verified (Place ID)"
                     self.summary.verified_matches += 1
